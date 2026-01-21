@@ -1,0 +1,47 @@
+import { Button } from "@/components/ui/button";
+import { NavigationContext } from "@/lib/NavigationProvider";
+import { cn } from "@/lib/utils";
+import { PlusIcon } from "lucide-react";
+import { useRouter } from "next/navigation";
+import React, { use } from "react";
+
+function Sidebar() {
+  const router = useRouter();
+  const { isMobileNavOpen, closeMobileNav } = use(NavigationContext);
+
+  const handleNewChat = () => {
+    // TODO: Implement creating a new chat Id page
+    // router.push("/dashboard/chat");
+    closeMobileNav();
+  };
+
+  return (
+    <>
+      {isMobileNavOpen && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs" onClick={closeMobileNav} />
+      )}
+      <div
+        className={cn(
+          "fixed md:inset-y-0 top-14 bottom-0 left-0 z-50 w-72 bg-gray-50/80 backdrop-blur-xl border-r border-gray-200/50 transform transition-transform duration-300 ease-in-out md:relative md:translate-x-0 md:top-0 flex flex-col",
+          isMobileNavOpen ? "translate-x-0" : "-translate-x-full",
+        )}
+      >
+        <div className="p-4 border-b border-gray-200/50">
+          <Button
+            onClick={handleNewChat}
+            className="w-full bg-white hover:bg-gray-50 text-gray-700 border border-gray-200/50 shadow-xs hover:shadow-sm transition-all duration-200"
+          >
+            <PlusIcon className="mr-2 h-4 w-4" /> New Chat
+          </Button>
+        </div>
+        <div className="flex-1 overflow-y-auto space-y-2.5 p-4 scrollbar-thin scrollbar-thumb-gray-200 scrollbar-track-transparent">
+          {/* {chats?.map((chat) => (
+            <ChatRow key={chat._id} chat={chat} onDelete={handleDeleteChat} />
+          ))} */}
+        </div>
+      </div>
+    </>
+  );
+}
+
+export default Sidebar;
