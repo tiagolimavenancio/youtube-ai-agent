@@ -1,18 +1,34 @@
+import React, { use } from "react";
+import { useRouter } from "next/navigation";
+import { PlusIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { api } from "@/convex/_generated/api";
 import { NavigationContext } from "@/lib/NavigationProvider";
 import { cn } from "@/lib/utils";
-import { PlusIcon } from "lucide-react";
-import { useRouter } from "next/navigation";
-import React, { use } from "react";
+import { useMutation, useQuery } from "convex/react";
+import { Id } from "@/convex/_generated/dataModel";
+import ChatRow from "@/components/ChatRow";
 
 function Sidebar() {
   const router = useRouter();
   const { isMobileNavOpen, closeMobileNav } = use(NavigationContext);
 
-  const handleNewChat = () => {
-    // TODO: Implement creating a new chat Id page
-    // router.push("/dashboard/chat");
+  const chats = useQuery(api.chats.listChats);
+  const createChat = useMutation(api.chats.createChat);
+  const deleteChat = useMutation(api.chats.deleteChat);
+
+  const handleNewChat = async () => {
+    const chatId = await createChat({ title: "New Chat" });
+    router.push(`/dashboard/chat/${chatId}`);
     closeMobileNav();
+  };
+
+  const handleDeleteChat = async (id: Id<"chats">) => {
+    await deleteChat({ id });
+    // If we're currently viewing this chat, redirect to dashboard
+    if (window.location.pathname.includes(id)) {
+      router.push("/dashboard");
+    }
   };
 
   return (
@@ -35,9 +51,9 @@ function Sidebar() {
           </Button>
         </div>
         <div className="flex-1 overflow-y-auto space-y-2.5 p-4 scrollbar-thin scrollbar-thumb-gray-200 scrollbar-track-transparent">
-          {/* {chats?.map((chat) => (
+          {chats?.map((chat) => (
             <ChatRow key={chat._id} chat={chat} onDelete={handleDeleteChat} />
-          ))} */}
+          ))}
         </div>
       </div>
     </>
