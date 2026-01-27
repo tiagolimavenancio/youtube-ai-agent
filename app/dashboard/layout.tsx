@@ -13,9 +13,9 @@ function DashoboardLayout({ children }: { children: ReactNode }) {
           <Sidebar />
         </Authenticated>
 
-        <div className="flex-1">
+        <div className="flex-1 flex flex-col min-w-0">
           <Header />
-          <main>{children}</main>
+          <main className="flex-1 overflow-y-auto">{children}</main>
         </div>
       </div>
     </NavigationProvider>
