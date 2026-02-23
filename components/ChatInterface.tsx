@@ -1,10 +1,14 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 "use client";
+
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Doc, Id } from "@/convex/_generated/dataModel";
-import { ChatRequestBody } from "@/lib/types";
+import { getConvexClient } from "@/lib/convex";
+import { createSSEParser } from "@/lib/createSSEParser";
+import { ChatRequestBody, StreamMessageType } from "@/lib/types";
 import { ArrowRight } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { api } from "@/convex/_generated/api";
 
 interface ChatInterfaceProps {
   chatId: Id<"chats">;
@@ -23,9 +27,54 @@ function ChatInterface({ chatId, initialMessages }: ChatInterfaceProps) {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, streamedResponse]);
 
+  const formatToolOutput = (output: unknown): string => {
+    if (typeof output === "string") return output;
+    return JSON.stringify(output, null, 2);
+  };
+
+  const formatTerminalOutput = (tool: string, input: unknown, output: unknown) => {
+    const terminalHtml = `<div class="bg-[#1e1e1e] text-white font-mono p-2 rounded-md my-2 overflow-x-auto whitespace-normal max-w-[600px]">
+      <div class="flex items-center gap-1.5 border-b border-gray-700 pb-1">
+        <span class="text-red-500">●</span>
+        <span class="text-yellow-500">●</span>
+        <span class="text-green-500">●</span>
+        <span class="text-gray-400 ml-1 text-sm">~/${tool}</span>
+      </div>
+      <div class="text-gray-400 mt-1">$ Input</div>
+      <pre class="text-yellow-400 mt-0.5 whitespace-pre-wrap overflow-x-auto">${formatToolOutput(input)}</pre>
+      <div class="text-gray-400 mt-2">$ Output</div>
+      <pre class="text-green-400 mt-0.5 whitespace-pre-wrap overflow-x-auto">${formatToolOutput(output)}</pre>
+    </div>`;
+
+    return `---START---\n${terminalHtml}\n---END---`;
+  };
+
+  const processStream = async (
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    onChunk: (chunk: string) => Promise<void>,
+  ) => {
+    const decoder = new TextDecoder();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) {
+          console.warn("Empty chunk received");
+          continue;
+        }
+        const chunk = decoder.decode(value);
+        await onChunk(chunk);
+      }
+    } catch (error) {
+      console.log("Error processing stream: ", error);
+      throw error;
+    } finally {
+      reader.releaseLock();
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-
     const trimmedInput = input.trim();
     if (!trimmedInput || isLoading) return;
 
@@ -37,11 +86,12 @@ function ChatInterface({ chatId, initialMessages }: ChatInterfaceProps) {
 
     // Add user´s message immediatily for better UX
     const optimisticUserMessage: Doc<"messages"> = {
-      _id: `temp_${Date.now()}`,
+      _id: `temp_${Date.now()}` as Id<"messages">,
       chatId,
       content: trimmedInput,
       role: "user",
       createdAt: Date.now(),
+      _creationTime: Date.now(),
     } as Doc<"messages">;
 
     setMessages((prev) => [...prev, optimisticUserMessage]);
@@ -51,13 +101,22 @@ function ChatInterface({ chatId, initialMessages }: ChatInterfaceProps) {
 
     // Start streaming response
     try {
+      // Normalize messages before creating the prompt
+      const messagesForPrompt = messages.map((msg) => {
+        if (Array.isArray(msg.content)) {
+          const textContent = msg.content.find((part) => part.type === "text")?.text || "";
+          return { ...msg, content: textContent };
+        }
+        return msg;
+      });
+
       const requestBody: ChatRequestBody = {
-        chatId,
-        messages: messages.map((msg) => ({
+        messages: messagesForPrompt.map((msg) => ({
           role: msg.role,
           content: msg.content,
         })),
         newMessage: trimmedInput,
+        chatId,
       };
 
       // Initialize SSE Connection
@@ -71,10 +130,97 @@ function ChatInterface({ chatId, initialMessages }: ChatInterfaceProps) {
       if (!response.body) throw new Error("No response body available");
 
       // Handle the stream
+      // Create SSE parser and stream reader
+      const parser = createSSEParser();
+      const reader = response.body.getReader();
+
+      // Process the stream chunks
+      await processStream(reader, async (chunk) => {
+        // Parse SSE messages from the chunk
+        const messages = parser.parse(chunk);
+
+        // Handle each based on its type
+        for (const message of messages) {
+          if (!message || !message.type) {
+            continue;
+          }
+
+          switch (message.type) {
+            case StreamMessageType.Token:
+              if ("token" in message && typeof message.token === "string") {
+                fullResponse += message.token;
+                setStreamedResponse(fullResponse);
+              } else {
+                console.warn("Invalid Token:", message);
+              }
+              break;
+
+            case StreamMessageType.ToolStart:
+              if ("tool" in message && "input" in message) {
+                setCurrentTool({
+                  name: message.tool,
+                  input: message.input,
+                });
+                fullResponse += formatTerminalOutput(message.tool, message.input, "Processing...");
+                setStreamedResponse(fullResponse);
+              } else {
+                console.warn("Invalid ToolStart:", message);
+              }
+              break;
+            case StreamMessageType.ToolEnd:
+              if ("tool" in message && "output" in message && currentTool) {
+                const lastTerminalIndex = fullResponse.lastIndexOf('<div class="bg-[#1e1e1e]');
+                if (lastTerminalIndex !== -1) {
+                  fullResponse =
+                    fullResponse.substring(0, lastTerminalIndex) +
+                    formatTerminalOutput(message.tool, currentTool.input, message.output);
+                  setStreamedResponse(fullResponse);
+                }
+                setCurrentTool(null);
+              } else {
+                console.warn("Invalid ToolEnd and currentTool undefined:", message);
+              }
+              break;
+            case StreamMessageType.Error:
+              if ("error" in message) {
+                throw new Error(message.error);
+              } else {
+                console.warn("Invalid Error:", message);
+              }
+              break;
+            case StreamMessageType.Done:
+              const assistantMessage: Doc<"messages"> = {
+                _id: `temp_assistant_${Date.now()}` as Id<"messages">,
+                chatId,
+                content: fullResponse,
+                role: "assistant",
+                createdAt: Date.now(),
+                _creationTime: Date.now(),
+              } as Doc<"messages">;
+
+              const convex = getConvexClient();
+              await convex.mutation(api.messages.store, {
+                chatId,
+                content: fullResponse,
+                role: "assistant",
+              });
+
+              setMessages((prev) => [...prev, assistantMessage]);
+              setStreamedResponse("");
+              return;
+          }
+        }
+      });
     } catch (error: any) {
       // Remove the optimistic user message if there was an error
       setMessages((prev) => prev.filter((msg) => msg._id !== optimisticUserMessage._id));
-      setStreamedResponse("error");
+      setStreamedResponse(
+        formatTerminalOutput(
+          "error",
+          "Failed to process message",
+          error instanceof Error ? error.message : "Unknown error",
+        ),
+      );
     } finally {
       setIsLoading(false);
     }
