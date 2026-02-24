@@ -9,6 +9,7 @@ import { createSSEParser } from "@/lib/createSSEParser";
 import { ChatRequestBody, StreamMessageType } from "@/lib/types";
 import { ArrowRight } from "lucide-react";
 import { api } from "@/convex/_generated/api";
+import MessageBubble from "@/components/MessageBubble";
 
 interface ChatInterfaceProps {
   chatId: Id<"chats">;
@@ -230,9 +231,31 @@ function ChatInterface({ chatId, initialMessages }: ChatInterfaceProps) {
     <main className="flex flex-col h-[calc(100vh-theme(spacing.14))]">
       <section className="flex-1 overflow-y-auto bg-gray-50 p-2 md:p-0">
         <div className="max-w-4xl mx-auto p-4 space-y-3">
-          {messages.map((message) => (
-            <div key={message._id}>{message.content}</div>
+          {messages.map((message: Doc<"messages">) => (
+            <MessageBubble
+              key={message._id}
+              content={message.content}
+              isUser={message.role === "user"}
+            />
           ))}
+
+          {streamedResponse && <MessageBubble content={streamedResponse} />}
+
+          {isLoading && !streamedResponse && (
+            <div className="flex justify-start animate-in fade-in-0">
+              <div className="rounded-2xl px-4 py-3 bg-white text-gray-900 rounded-bl-none shadow-sm ring-1 ring-inset ring-gray-200">
+                <div className="flex items-center gap-1.5">
+                  {[0.3, 0.15, 0].map((delay, i) => (
+                    <div
+                      key={i}
+                      className="h-1.5 w-1.5 rounded-full bg-gray-400 animate-bounce"
+                      style={{ animationDelay: `-${delay}s` }}
+                    />
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
           <div ref={messagesEndRef} />
         </div>
       </section>

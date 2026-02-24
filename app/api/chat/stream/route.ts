@@ -14,25 +14,23 @@ import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages";
 import { NextResponse } from "next/server";
 
 function sendSSEMessage(writer: WritableStreamDefaultWriter<Uint8Array>, data: StreamMessage) {
-  const enconder = new TextEncoder();
+  const encoder = new TextEncoder();
   return writer.write(
-    enconder.encode(`${SSE_DATA_PREFIX}${JSON.stringify(data)}${SSE_LINE_DELIMITER}`),
+    encoder.encode(`${SSE_DATA_PREFIX}${JSON.stringify(data)}${SSE_LINE_DELIMITER}`),
   );
 }
 
-export async function POST(req: Request) {
+export async function POST(request: Request) {
   try {
     const { userId } = await auth();
-
     if (!userId) {
       return new Response("Unauthorized", { status: 401 });
     }
-
-    const body = (await req.json()) as ChatRequestBody;
+    const body = (await request.json()) as ChatRequestBody;
     const { messages, newMessage, chatId } = body;
     const convex = getConvexClient();
 
-    // Create stream with larger queue strategy for better performance
+    //* Create stream with larger queue strategy for better performance
     const stream = new TransformStream({}, { highWaterMark: 1024 });
     const writer = stream.writable.getWriter();
 
@@ -40,26 +38,23 @@ export async function POST(req: Request) {
       headers: {
         "Content-Type": "text/event-stream",
         Connection: "keep-alive",
-        "X-Accel-Buffering": "no", // Disable buffering for nginx which is required for SSE to work properly
+        "X-Accel-Buffering": "no",
       },
     });
 
+    //* Send the initial message to the client
     const startStream = async () => {
       try {
-        // Stream will be implemented here
-
-        // Send initial connection established message
+        //* Send initial connection stableshed message
         await sendSSEMessage(writer, {
           type: StreamMessageType.Connected,
           content: "",
         });
-
-        // Send user message to Convex
+        //* Send user message to Convex
         await convex.mutation(api.messages.send, {
           chatId,
           content: newMessage,
         });
-
         // Convert messages to LangChain format
         const langChainMessages = [
           ...messages.map((msg) =>
@@ -69,10 +64,9 @@ export async function POST(req: Request) {
         ];
 
         try {
-          // Create the event stream
           const eventStream = await submitQuestion(langChainMessages, chatId);
 
-          // Process the events
+          //? Process the event stream
           for await (const event of eventStream) {
             if (event.event === "on_chat_model_stream") {
               const token = event.data.chunk;
@@ -83,14 +77,23 @@ export async function POST(req: Request) {
                   await sendSSEMessage(writer, {
                     type: StreamMessageType.Token,
                     token: text,
+                    content: "",
                   });
                 }
               }
+            } else if (event.event === "on_chat_model_end") {
+              // We ensure that the Done message is sent when the LLM model ends
+              console.log("LLM completed, sending Done message");
+              await sendSSEMessage(writer, {
+                type: StreamMessageType.Done,
+                content: "",
+              });
             } else if (event.event === "on_tool_start") {
               await sendSSEMessage(writer, {
                 type: StreamMessageType.ToolStart,
                 tool: event.name || "unknown",
                 input: event.data.input,
+                content: "",
               });
             } else if (event.event === "on_tool_end") {
               const toolMessage = new ToolMessage(event.data.output);
@@ -98,22 +101,31 @@ export async function POST(req: Request) {
                 type: StreamMessageType.ToolEnd,
                 tool: toolMessage.lc_kwargs.name || "unknown",
                 output: event.data.output,
+                content: "",
               });
             }
-
-            // Send completion message without storing the response
-            await sendSSEMessage(writer, { type: StreamMessageType.Done });
           }
+
+          // We send the Done message as a fallback if the on_chat_model_end event was not received
+          await sendSSEMessage(writer, {
+            type: StreamMessageType.Done,
+            content: "",
+          });
+          console.log("Backup Done message sent");
         } catch (streamError) {
+          console.log("Stream error: ", streamError);
           await sendSSEMessage(writer, {
             type: StreamMessageType.Error,
             error: streamError instanceof Error ? streamError.message : "Stream processing failed",
+            content: "",
           });
         }
       } catch (error) {
+        console.error("Error in chat stream: ", error);
         await sendSSEMessage(writer, {
           type: StreamMessageType.Error,
           error: error instanceof Error ? error.message : "Unknown error in chat stream",
+          content: "",
         });
       } finally {
         try {
@@ -126,12 +138,8 @@ export async function POST(req: Request) {
 
     startStream();
     return response;
-  } catch (error: any) {
-    return NextResponse.json(
-      {
-        error: "Failed to process chat request",
-      } as const,
-      { status: 500 },
-    );
+  } catch (error) {
+    console.error(error);
+    return NextResponse.json({ error: "Failed to process chat request" } as const, { status: 500 });
   }
 }
