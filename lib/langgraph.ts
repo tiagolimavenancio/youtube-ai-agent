@@ -1,8 +1,4 @@
-import { ChatAnthropic } from "@langchain/anthropic";
-import { ToolNode } from "@langchain/langgraph/prebuilt";
-import wxflows from "@wxflows/sdk/langchain";
-import { END, MemorySaver, MessagesAnnotation, START, StateGraph } from "@langchain/langgraph";
-import SYSTEM_MESSAGE from "@/constants/systemMessage";
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import {
   AIMessage,
   BaseMessage,
@@ -10,8 +6,15 @@ import {
   SystemMessage,
   trimMessages,
 } from "@langchain/core/messages";
+import { ChatGroq } from "@langchain/groq";
+import { END, MessagesAnnotation, START, StateGraph } from "@langchain/langgraph";
+import { MemorySaver } from "@langchain/langgraph";
+import { ToolNode } from "@langchain/langgraph/prebuilt";
+import wxflows from "@wxflows/sdk/langchain";
 import { ChatPromptTemplate, MessagesPlaceholder } from "@langchain/core/prompts";
+import SYSTEM_MESSAGE from "@/constants/systemMessage";
 
+// Trim the messages to manage conversation history
 const trimmer = trimMessages({
   maxTokens: 10,
   strategy: "last",
@@ -31,27 +34,28 @@ const toolClient = new wxflows({
 const tools = await toolClient.lcTools;
 const toolNode = new ToolNode(tools);
 
-const initialseModel = () => {
-  const model = new ChatAnthropic({
-    modelName: "claude-3-5-sonnet-20241022",
-    anthropicApiKey: process.env.ANTHROPIC_API_KEY,
-    temperature: 0.7, // Higher temperature for more creative responses
-    maxTokens: 4096, // Higher max tokens for longer responses
-    streaming: true, // Enable streaming for SSE
+// Connect to the LLM provider with better tool instructions
+const initialiseModel = () => {
+  const model = new ChatGroq({
+    model: "llama-3.3-70b-versatile",
+    // anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+    temperature: 0.7,
+    maxTokens: 4096,
+    streaming: true,
     callbacks: [
       {
         handleLLMStart: async () => {
-          console.log("Starting LLM call");
+          // console.log("🤖 Starting LLM call");
         },
         handleLLMEnd: async (output) => {
+          console.log("🤖 End LLM call", output);
           const usage = output.llmOutput?.usage;
           if (usage) {
             // console.log("📊 Token Usage:", {
             //   input_tokens: usage.input_tokens,
             //   output_tokens: usage.output_tokens,
             //   total_tokens: usage.input_tokens + usage.output_tokens,
-            //   cache_creation_input_tokens:
-            //     usage.cache_creation_input_tokens || 0,
+            //   cache_creation_input_tokens: usage.cache_creation_input_tokens || 0,
             //   cache_read_input_tokens: usage.cache_read_input_tokens || 0,
             // });
           }
@@ -61,40 +65,35 @@ const initialseModel = () => {
         // },
       },
     ],
-    clientOptions: {
-      defaultHeaders: {
-        "anthropic-beta": "prompt-caching-2024-07-31",
-      },
-    },
   }).bindTools(tools);
 
   return model;
 };
 
 // Define the function that determines whether to continue or not
-const shouldContinue = (state: typeof MessagesAnnotation.State) => {
+function shouldContinue(state: typeof MessagesAnnotation.State) {
   const messages = state.messages;
   const lastMessage = messages[messages.length - 1] as AIMessage;
 
-  // If the LLM makes a tool call, then we route to the 'tools' node
+  // If the LLM makes a tool call, then we route to the "tools" node
   if (lastMessage.tool_calls?.length) {
     return "tools";
   }
 
-  // If the last message is a tool message route back to agent
+  // If the last message is a tool message, route back to agent
   if (lastMessage.content && lastMessage._getType() === "tool") {
     return "agent";
   }
 
   // Otherwise, we stop (reply to the user)
   return END;
-};
+}
 
 // Define a new graph
 const createWorkflow = () => {
-  const model = initialseModel();
+  const model = initialiseModel();
 
-  const stateGraph = new StateGraph(MessagesAnnotation)
+  return new StateGraph(MessagesAnnotation)
     .addNode("agent", async (state) => {
       // Create the system message content
       const systemContent = SYSTEM_MESSAGE;
@@ -104,34 +103,115 @@ const createWorkflow = () => {
         new SystemMessage(systemContent, {
           cache_control: { type: "ephemeral" },
         }),
-        new MessagesPlaceholder("message"),
+        new MessagesPlaceholder("messages"),
       ]);
 
       // Trim the messages to manage conversation history
       const trimmedMessages = await trimmer.invoke(state.messages);
 
       // Format the prompt with the current messages
-      const prompt = await promptTemplate.invoke({ message: trimmedMessages });
+      const prompt = await promptTemplate.invoke({ messages: trimmedMessages });
 
-      // Get response from the model
-      const response = await model.invoke(prompt);
+      console.log("🤖 Prompt:", prompt);
 
-      return { messages: [response] };
+      // Ensure message content is a string
+      prompt.lc_kwargs.messages = prompt.lc_kwargs.messages.map((message: { content: any }) => {
+        if (Array.isArray(message.content)) {
+          // If content is an array, extract the text and join it into a string
+          message.content = message.content.map((item: { text: string }) => item.text).join(" ");
+        } else if (typeof message.content !== "string") {
+          // If content is not a string, convert it to JSON
+          message.content = JSON.stringify(message.content);
+        }
+        return message;
+      });
+
+      console.log("Processed messages:", prompt.lc_kwargs.messages);
+
+      // Validate prompt content before sending it to the model
+      console.log(
+        "📋 Validating prompt before invoking the model:",
+        JSON.stringify(prompt, null, 2),
+      );
+
+      // Get the model response
+      try {
+        const response = await model.invoke(prompt);
+        // Ensure the response content is a string
+        if (response.content && typeof response.content !== "string") {
+          response.content = JSON.stringify(response.content);
+        }
+
+        // Record details of the model's response
+        console.log("Model response details:", JSON.stringify(response, null, 2));
+
+        // Validate that the response content is not empty
+        if (!response.content || response.content.trim() === "") {
+          console.warn("Record details of the model's response:", response);
+          response.content = "I'm sorry, I couldn't generate a valid answer.";
+        }
+
+        // Handle errors or empty tool responses
+        if (
+          response.content === "" &&
+          Array.isArray(response.tool_calls) &&
+          response.tool_calls.length > 0
+        ) {
+          response.content = "Sorry, there was a problem processing the tool used.";
+        }
+
+        // Validate and correct tool arguments before using them
+        if (response.tool_calls && Array.isArray(response.tool_calls)) {
+          response.tool_calls = response.tool_calls.map((toolCall) => {
+            if (toolCall.args && typeof toolCall.args === "string") {
+              try {
+                // Try parsing the arguments as JSON
+                toolCall.args = JSON.parse(toolCall.args);
+              } catch (e: any) {
+                console.error("Error parsing tool arguments:", toolCall.args);
+                toolCall.args = { error: "Invalid JSON format" };
+              }
+            }
+            return toolCall;
+          });
+        }
+
+        return { messages: [response] };
+      } catch (error) {
+        console.error("Error invoking the model:", error);
+        console.error("Error details:", JSON.stringify(error, null, 2));
+        // Handle the case of token limit reached
+        if (
+          typeof error === "object" &&
+          error !== null &&
+          "status" in error &&
+          error.status === 429 &&
+          "error" in error &&
+          typeof error.error === "object" &&
+          error.error !== null &&
+          "code" in error.error &&
+          error.error.code === "rate_limit_exceeded"
+        ) {
+          console.error("The model has reached the daily token limit. Please try again later.");
+          return {
+            messages: [
+              {
+                content:
+                  "Sorry, this model has reached its daily usage limit. Please try again later.",
+              },
+            ],
+          };
+        }
+        throw new Error("Error processing the prompt. Check the message content.");
+      }
     })
-    .addEdge(START, "agent")
     .addNode("tools", toolNode)
+    .addEdge(START, "agent")
     .addConditionalEdges("agent", shouldContinue)
     .addEdge("tools", "agent");
-
-  return stateGraph;
 };
 
 function addCachingHeaders(messages: BaseMessage[]): BaseMessage[] {
-  // Rules of caching headers for turn-by-turn conversations
-  // 1. Cache the first system message
-  // 2. Cache the last message
-  // 3. Cache the second to last human message
-
   if (!messages.length) return messages;
 
   // Create a copy of messages to avoid mutating the original
@@ -149,6 +229,7 @@ function addCachingHeaders(messages: BaseMessage[]): BaseMessage[] {
   };
 
   // Cache the last message
+  // console.log("🤑🤑🤑 Caching last message");
   addCache(cachedMessages.at(-1)!);
 
   // Find and cache the second-to-last human message
@@ -170,6 +251,7 @@ function addCachingHeaders(messages: BaseMessage[]): BaseMessage[] {
 export async function submitQuestion(messages: BaseMessage[], chatId: string) {
   // Add caching headers to messages
   const cachedMessages = addCachingHeaders(messages);
+  // console.log("🔒🔒🔒 Messages:", cachedMessages);
 
   // Create workflow with chatId and onToken callback
   const workflow = createWorkflow();
@@ -178,11 +260,8 @@ export async function submitQuestion(messages: BaseMessage[], chatId: string) {
   const checkpointer = new MemorySaver();
   const app = workflow.compile({ checkpointer });
 
-  // Run the graph and stream
   const stream = await app.streamEvents(
-    {
-      messages: cachedMessages,
-    },
+    { messages: cachedMessages },
     {
       version: "v2",
       configurable: { thread_id: chatId },
@@ -190,6 +269,5 @@ export async function submitQuestion(messages: BaseMessage[], chatId: string) {
       runId: chatId,
     },
   );
-
   return stream;
 }

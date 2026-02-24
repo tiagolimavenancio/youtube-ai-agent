@@ -1,9 +1,12 @@
+import React, { use } from "react";
 import { Button } from "@/components/ui/button";
+import { api } from "@/convex/_generated/api";
 import { Doc, Id } from "@/convex/_generated/dataModel";
 import { NavigationContext } from "@/lib/NavigationProvider";
+import { useQuery } from "convex/react";
 import { TrashIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
-import React, { use } from "react";
+import TimeAgo from "react-timeago";
 
 interface ChatRowProps {
   chat: Doc<"chats">;
@@ -13,6 +16,7 @@ interface ChatRowProps {
 function ChatRow({ chat, onDelete }: ChatRowProps) {
   const router = useRouter();
   const { closeMobileNav } = use(NavigationContext);
+  const lastMessage = useQuery(api.messages.getLastMessage, { chatId: chat._id });
 
   const handleClick = () => {
     router.push(`/dashboard/chat/${chat._id}`);
@@ -31,7 +35,16 @@ function ChatRow({ chat, onDelete }: ChatRowProps) {
     >
       <div className="p-4">
         <div className="flex justify-between items-start">
-          {chat.title}
+          <p className="text-sm text-gray-600 truncate flex-1 font-medium">
+            {lastMessage ? (
+              <>
+                {lastMessage?.role === "user" ? "You: " : "AI: "}
+                {lastMessage?.content.replace(/\\n/g, "\n")}
+              </>
+            ) : (
+              <span className="text-gray-400">New Conversation</span>
+            )}
+          </p>
           <Button
             variant={"ghost"}
             size={"icon"}
@@ -41,6 +54,13 @@ function ChatRow({ chat, onDelete }: ChatRowProps) {
             <TrashIcon className="size-4 text-gray-400 hover:text-red-500 transition-colors duration-300" />
           </Button>
         </div>
+
+        {/** Last Message */}
+        {lastMessage && (
+          <p className="text-xs text-gray-400 mt-1.5 font-medium">
+            <TimeAgo date={lastMessage.createdAt} />
+          </p>
+        )}
       </div>
     </div>
   );
